@@ -45,6 +45,15 @@ const MAX_INTERMEDIATES: usize = 2;
 const MAX_OSC_PARAMS: usize = 16;
 const MAX_OSC_RAW: usize = 1024;
 
+/// OSC length limit with the `std` feature. Bytes past it are dropped, like
+/// they are when the `no_std` buffer is full.
+#[cfg(feature = "std")]
+const MAX_OSC_RAW_STD: usize = 1 << 21;
+
+/// Capacity an OSC buffer is shrunk back to once a long sequence ends.
+#[cfg(feature = "std")]
+const OSC_RAW_KEEP: usize = 1 << 12;
+
 /// Parser for raw _VTE_ protocol which delegates actions to a [`Perform`]
 ///
 /// [`Perform`]: trait.Perform.html
@@ -548,6 +557,12 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 return;
             }
         }
+        #[cfg(feature = "std")]
+        {
+            if self.osc_raw.len() >= MAX_OSC_RAW_STD {
+                return;
+            }
+        }
         self.osc_raw.push(byte);
     }
 
@@ -555,6 +570,12 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         self.action_osc_put_param();
         self.osc_dispatch(performer, byte);
         self.osc_raw.clear();
+        #[cfg(feature = "std")]
+        {
+            if self.osc_raw.capacity() > OSC_RAW_KEEP {
+                self.osc_raw.shrink_to(OSC_RAW_KEEP);
+            }
+        }
         self.osc_num_params = 0;
     }
 
@@ -929,6 +950,25 @@ mod tests {
             Sequence::Osc(..) => (),
             _ => panic!("expected osc sequence"),
         }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn unterminated_osc_is_bounded() {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        parser.advance(&mut dispatcher, b"\x1b]2;");
+        let chunk = [b'y'; 1 << 16];
+        for _ in 0..(MAX_OSC_RAW_STD / chunk.len() + 8) {
+            parser.advance(&mut dispatcher, &chunk);
+        }
+        assert!(parser.osc_raw.len() <= MAX_OSC_RAW_STD);
+        assert!(parser.osc_raw.capacity() <= MAX_OSC_RAW_STD);
+
+        parser.advance(&mut dispatcher, b"\x07");
+        assert!(parser.osc_raw.capacity() <= OSC_RAW_KEEP);
+        assert_eq!(dispatcher.dispatched.len(), 1);
     }
 
     #[test]
